@@ -1,115 +1,574 @@
-# Prisma Blog - Schema Models
+# 2-5. 효율적인 관계 쿼리 (N+1 문제 해결) 실습 가이드
 
-2-2. Prisma 스키마: 모델과 관계 정의하기 강의의 결과물입니다.
+아래 체크리스트에 따라 파일을 생성/수정하고, 코드 블록을 그대로 작성하세요.
 
-## 프로젝트 구조
+---
 
+## 체크리스트
+
+### □ 1단계: User Repository에 관계 쿼리 함수 추가 (+ export 이름 변경)
+
+**src/repository/users.repository.js 수정:**
+
+```javascript
+import { prisma } from "#db/prisma.js";
+
+// ... 기존 함수들 ...
+
+// 사용자와 게시글 함께 조회
+function findUserWithPosts(id) {
+  return prisma.user.findUnique({
+    where: { id: Number(id) },
+    include: {
+      posts: true,
+    },
+  });
+}
+
+// 모든 사용자와 게시글 함께 조회
+function findAllUsersWithPosts() {
+  return prisma.user.findMany({
+    include: {
+      posts: true,
+    },
+  });
+}
+
+// ✅ userRepository → usersRepository로 변경
+export const usersRepository = {
+  createUser,
+  findUserById,
+  findAllUsers,
+  updateUser,
+  deleteUser,
+  findUserWithPosts,
+  findAllUsersWithPosts,
+};
 ```
-prisma-blog/
-├── prisma/
-│   ├── schema.prisma       # User와 Post 모델 정의
-│   └── migrations/         # 마이그레이션 파일 (실행 후 생성)
-├── env/
-│   ├── .env.example
-│   ├── .env.development
-│   └── .env.production
-├── src/
-│   ├── config/
-│   │   └── config.js
-│   ├── db/
-│   │   └── prisma.js
-│   └── server.js
-├── generated/
-│   └── prisma/             # 생성된 Prisma Client (실행 후 생성)
-├── prisma.config.js
-├── jsconfig.json
-├── .prettierrc
-├── eslint.config.js
-├── .gitignore
-└── package.json
+
+---
+
+### □ 2단계: Post Repository 생성
+
+**src/repository/posts.repository.js 생성:**
+
+```javascript
+import { prisma } from "#db/prisma.js";
+
+// 게시글 생성
+function createPost(data) {
+  return prisma.post.create({
+    data,
+  });
+}
+
+// 특정 게시글 조회
+function findPostById(id, include = null) {
+  return prisma.post.findUnique({
+    where: { id: Number(id) },
+    ...(include && { include }),
+  });
+}
+
+// 모든 게시글 조회
+function findAllPosts(include = null) {
+  return prisma.post.findMany({
+    ...(include && { include }),
+  });
+}
+
+// 게시글 정보 수정
+function updatePost(id, data) {
+  return prisma.post.update({
+    where: { id: Number(id) },
+    data,
+  });
+}
+
+// 게시글 삭제
+function deletePost(id) {
+  return prisma.post.delete({
+    where: { id: Number(id) },
+  });
+}
+
+export const postRepository = {
+  createPost,
+  findPostById,
+  findAllPosts,
+  updatePost,
+  deletePost,
+};
 ```
 
-## 설치 및 실행
+---
+
+### □ 3단계: Repository export 통합 업데이트
+
+**src/repository/index.js 수정:**
+
+```javascript
+export { usersRepository } from "./users.repository.js";
+export { postRepository } from "./posts.repository.js";
+```
+
+---
+
+### □ 4단계: Post 에러 메시지 상수 추가
+
+**src/constants/errors.js 수정:**
+
+```javascript
+// 에러 메시지 상수
+export const ERROR_MESSAGE = {
+  // User 관련
+  USER_NOT_FOUND: "User not found",
+  EMAIL_REQUIRED: "Email is required",
+  EMAIL_ALREADY_EXISTS: "Email already exists",
+  FAILED_TO_FETCH_USERS: "Failed to fetch users",
+  FAILED_TO_FETCH_USER: "Failed to fetch user",
+  FAILED_TO_CREATE_USER: "Failed to create user",
+  FAILED_TO_UPDATE_USER: "Failed to update user",
+  FAILED_TO_DELETE_USER: "Failed to delete user",
+
+  // Post 관련
+  POST_NOT_FOUND: "Post not found",
+  TITLE_REQUIRED: "Title is required",
+  AUTHOR_ID_REQUIRED: "Author ID is required",
+  FAILED_TO_FETCH_POSTS: "Failed to fetch posts",
+  FAILED_TO_FETCH_POST: "Failed to fetch post",
+  FAILED_TO_CREATE_POST: "Failed to create post",
+  FAILED_TO_UPDATE_POST: "Failed to update post",
+  FAILED_TO_DELETE_POST: "Failed to delete post",
+  FAILED_TO_FETCH_USER_WITH_POSTS:
+    "Failed to fetch user with posts",
+};
+```
+
+---
+
+### □ 5단계: Post Router 폴더 구조 생성
+
+#### 1) posts 폴더 생성
 
 ```bash
-# 1. 의존성 설치
-npm install
+mkdir -p src/routes/posts
+```
 
-# 2. 환경 변수 설정
-cp env/.env.example env/.env.development
-# env/.env.development 파일을 열어 DATABASE_URL 수정
+#### 2) Post CRUD 라우터 생성
 
-# 3. Prisma Client 생성
-npm run prisma:generate
+**src/routes/posts/posts.routes.js 생성:**
 
-# 4. 마이그레이션 실행
-npm run prisma:migrate
-# 마이그레이션 이름 입력: init
+```javascript
+import express from "express";
+import { postRepository } from "#repository";
+import {
+  HTTP_STATUS,
+  PRISMA_ERROR,
+  ERROR_MESSAGE,
+} from "#constants";
 
-# 5. 개발 서버 실행
+export const postsRouter = express.Router();
+
+// GET /api/posts - 모든 게시글 조회 (작성자 포함)
+postsRouter.get("/", async (req, res) => {
+  try {
+    const posts = await postRepository.findAllPosts({
+      author: true,
+    });
+    res.json(posts);
+  } catch (_) {
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_FETCH_POSTS });
+  }
+});
+
+// GET /api/posts/:id - 특정 게시글 조회 (작성자 포함)
+postsRouter.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const post = await postRepository.findPostById(id, {
+      author: true,
+    });
+
+    if (!post) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.POST_NOT_FOUND });
+    }
+
+    res.json(post);
+  } catch (_) {
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_FETCH_POST });
+  }
+});
+
+// POST /api/posts - 새 게시글 생성
+postsRouter.post("/", async (req, res) => {
+  try {
+    const { title, content, published, authorId } =
+      req.body;
+
+    if (!title) {
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ error: ERROR_MESSAGE.TITLE_REQUIRED });
+    }
+
+    if (!authorId) {
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ error: ERROR_MESSAGE.AUTHOR_ID_REQUIRED });
+    }
+
+    const newPost = await postRepository.createPost({
+      title,
+      content,
+      published: published ?? false,
+      authorId: Number(authorId),
+    });
+
+    res.status(HTTP_STATUS.CREATED).json(newPost);
+  } catch (_) {
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_CREATE_POST });
+  }
+});
+
+// PATCH /api/posts/:id - 게시글 정보 수정
+postsRouter.patch("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, content, published } = req.body;
+
+    const updatedPost = await postRepository.updatePost(
+      id,
+      {
+        title,
+        content,
+        published,
+      }
+    );
+
+    res.json(updatedPost);
+  } catch (error) {
+    if (error.code === PRISMA_ERROR.RECORD_NOT_FOUND) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.POST_NOT_FOUND });
+    }
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_UPDATE_POST });
+  }
+});
+
+// DELETE /api/posts/:id - 게시글 삭제
+postsRouter.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await postRepository.deletePost(id);
+    res.status(HTTP_STATUS.NO_CONTENT).send();
+  } catch (error) {
+    if (error.code === PRISMA_ERROR.RECORD_NOT_FOUND) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.POST_NOT_FOUND });
+    }
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_DELETE_POST });
+  }
+});
+```
+
+#### 3) posts/index.js 생성 (라우터 통합)
+
+**src/routes/posts/index.js 생성:**
+
+```javascript
+import express from "express";
+import { postsRouter } from "./posts.routes.js";
+
+export const postRouter = express.Router();
+
+// Post CRUD 라우트 연결
+postRouter.use("/", postsRouter);
+```
+
+---
+
+### □ 6단계: User 라우터를 폴더 구조로 변경 (+ export 이름 변경)
+
+#### 1) users 폴더 생성 및 파일 이동
+
+```bash
+mkdir -p src/routes/users
+mv src/routes/users.routes.js src/routes/users/users.routes.js
+```
+
+#### 2) users/index.js 생성
+
+**src/routes/users/index.js 생성:**
+
+```javascript
+import express from "express";
+import { usersRouter } from "./users.routes.js";
+
+export const userRouter = express.Router();
+
+// User CRUD 라우트 연결
+userRouter.use("/", usersRouter);
+```
+
+#### 3) users.routes.js 수정 (export 및 변수명 변경)
+
+**src/routes/users/users.routes.js 수정:**
+
+```javascript
+import express from "express";
+import { usersRepository } from "#repository";
+import {
+  HTTP_STATUS,
+  PRISMA_ERROR,
+  ERROR_MESSAGE,
+} from "#constants";
+
+export const usersRouter = express.Router();
+
+// GET /api/users - 모든 사용자 조회
+usersRouter.get("/", async (req, res) => {
+  try {
+    const users = await usersRepository.findAllUsers();
+    res.json(users);
+  } catch (_) {
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_FETCH_USERS });
+  }
+});
+
+// GET /api/users/:id - 특정 사용자 조회
+usersRouter.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await usersRepository.findUserById(id);
+
+    if (!user) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.USER_NOT_FOUND });
+    }
+
+    res.json(user);
+  } catch (_) {
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_FETCH_USER });
+  }
+});
+
+// POST /api/users - 새 사용자 생성
+usersRouter.post("/", async (req, res) => {
+  try {
+    const { email, name } = req.body;
+
+    if (!email) {
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ error: ERROR_MESSAGE.EMAIL_REQUIRED });
+    }
+
+    const newUser = await usersRepository.createUser({
+      email,
+      name,
+    });
+    res.status(HTTP_STATUS.CREATED).json(newUser);
+  } catch (error) {
+    if (error.code === PRISMA_ERROR.UNIQUE_CONSTRAINT) {
+      return res.status(HTTP_STATUS.CONFLICT).json({
+        error: ERROR_MESSAGE.EMAIL_ALREADY_EXISTS,
+      });
+    }
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_CREATE_USER });
+  }
+});
+
+// PATCH /api/users/:id - 사용자 정보 수정
+usersRouter.patch("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email, name } = req.body;
+
+    const updatedUser = await usersRepository.updateUser(
+      id,
+      { email, name }
+    );
+    res.json(updatedUser);
+  } catch (error) {
+    if (error.code === PRISMA_ERROR.RECORD_NOT_FOUND) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.USER_NOT_FOUND });
+    }
+    if (error.code === PRISMA_ERROR.UNIQUE_CONSTRAINT) {
+      return res.status(HTTP_STATUS.CONFLICT).json({
+        error: ERROR_MESSAGE.EMAIL_ALREADY_EXISTS,
+      });
+    }
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_UPDATE_USER });
+  }
+});
+
+// DELETE /api/users/:id - 사용자 삭제
+usersRouter.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await usersRepository.deleteUser(id);
+    res.status(HTTP_STATUS.NO_CONTENT).send();
+  } catch (error) {
+    if (error.code === PRISMA_ERROR.RECORD_NOT_FOUND) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.USER_NOT_FOUND });
+    }
+    res
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+      .json({ error: ERROR_MESSAGE.FAILED_TO_DELETE_USER });
+  }
+});
+```
+
+---
+
+### □ 7단계: Nested Resource (/users/:id/posts) 추가
+
+#### 1) users/posts 폴더 생성
+
+```bash
+mkdir -p src/routes/users/posts
+```
+
+#### 2) user-posts.routes.js 생성
+
+**src/routes/users/posts/user-posts.routes.js 생성:**
+
+```javascript
+import express from "express";
+import { usersRepository } from "#repository";
+import { HTTP_STATUS, ERROR_MESSAGE } from "#constants";
+
+export const userPostsRouter = express.Router({
+  mergeParams: true,
+});
+
+// GET /api/users/:id/posts - 사용자와 게시글 함께 조회
+userPostsRouter.get("/", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await usersRepository.findUserWithPosts(
+      Number(id)
+    );
+
+    if (!user) {
+      return res
+        .status(HTTP_STATUS.NOT_FOUND)
+        .json({ error: ERROR_MESSAGE.USER_NOT_FOUND });
+    }
+
+    res.json(user);
+  } catch (_) {
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+      error: ERROR_MESSAGE.FAILED_TO_FETCH_USER_WITH_POSTS,
+    });
+  }
+});
+```
+
+#### 3) users/posts/index.js 생성
+
+**src/routes/users/posts/index.js 생성:**
+
+```javascript
+import express from "express";
+import { userPostsRouter as router } from "./user-posts.routes.js";
+
+export const userPostsRouter = express.Router({
+  mergeParams: true,
+});
+
+// User의 Posts 라우트 연결
+userPostsRouter.use("/", router);
+```
+
+#### 4) users/index.js 수정
+
+**src/routes/users/index.js 수정:**
+
+```javascript
+import express from "express";
+import { usersRouter } from "./users.routes.js";
+import { userPostsRouter } from "./posts/index.js";
+
+export const userRouter = express.Router();
+
+// User 기본 CRUD 라우트 연결
+userRouter.use("/", usersRouter);
+
+// Nested resource: /users/:id/posts
+userRouter.use("/:id/posts", userPostsRouter);
+```
+
+---
+
+### □ 8단계: 전체 라우터 통합 업데이트
+
+**src/routes/index.js 수정:**
+
+```javascript
+import express from "express";
+import { userRouter } from "./users/index.js";
+import { postRouter } from "./posts/index.js";
+
+export const router = express.Router();
+
+router.use("/users", userRouter);
+router.use("/posts", postRouter);
+```
+
+---
+
+### □ 9단계: 서버 실행 및 API 테스트
+
+```bash
 npm run dev
-
-# 6. (선택) Prisma Studio로 데이터베이스 확인
-npm run prisma:studio
+npm run seed
 ```
 
-## 주요 변경사항 (01-setup → 02-schema-models)
+```http
+# 사용자와 게시글 함께 조회 (Nested Resource)
+GET http://localhost:5001/api/users/1/posts
 
-### 1. schema.prisma에 모델 추가
+# 모든 게시글 조회 (작성자 포함)
+GET http://localhost:5001/api/posts
 
-**User 모델:**
-
-- `id`: Primary Key (자동 증가)
-- `email`: 중복 불가
-- `name`: 선택적 필드
-- `posts`: Post 모델과의 관계 (1:N)
-- `createdAt`, `updatedAt`: 자동 타임스탬프
-
-**Post 모델:**
-
-- `id`: Primary Key (자동 증가)
-- `title`: 게시글 제목
-- `content`: 게시글 내용 (선택적)
-- `published`: 공개 여부 (기본값: false)
-- `author`, `authorId`: User 모델과의 관계
-- `createdAt`, `updatedAt`: 자동 타임스탬프
-
-### 2. 관계 설정 (1:N)
-
-```prisma
-// User: 한 명의 사용자가 여러 게시글 작성
-model User {
-  posts Post[]  // Post 배열
-}
-
-// Post: 각 게시글은 한 명의 작성자
-model Post {
-  author   User @relation(fields: [authorId], references: [id])
-  authorId Int
-}
+# 특정 게시글 조회 (작성자 포함)
+GET http://localhost:5001/api/posts/1
 ```
 
-## 마이그레이션
+---
 
-마이그레이션 실행 시 다음이 생성됩니다:
+## 완료 확인
 
-- `prisma/migrations/` 폴더
-- `20YYMMDDHHMMSS_init/` 마이그레이션 폴더
-- SQL 파일 (CREATE TABLE 명령어)
-
-## 주요 명령어
-
-```bash
-npm run prisma:generate  # Prisma Client 생성
-npm run prisma:migrate   # 마이그레이션 생성 및 적용
-npm run prisma:studio    # Prisma Studio 실행
-npm run dev              # 개발 서버 실행
-```
-
-## 다음 단계
-
-이제 데이터베이스 테이블이 생성되었습니다. 다음 강의에서는:
-
-- 마이그레이션의 동작 원리 학습
-- 시딩(Seeding)으로 테스트 데이터 생성
-- Prisma Client로 CRUD 작업 수행
+✅ usersRepository에 관계 쿼리가 추가되었나요?
+✅ postsRepository/postsRouter가 폴더 구조로 추가되었나요?
+✅ users 라우터가 폴더 구조로 변경되었나요?
+✅ /api/users/:id/posts가 정상 동작하나요?

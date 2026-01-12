@@ -1,112 +1,176 @@
-# Prisma Blog - Schema Models
+# 2-3. 마이그레이션과 시딩 실습 가이드
 
-2-2. Prisma 스키마: 모델과 관계 정의하기 강의의 결과물입니다.
+아래 체크리스트에 따라 파일을 생성/수정하고, 코드 블록을 그대로 작성하세요.
 
-## 프로젝트 구조
+---
 
-```
-prisma-blog/
-├── prisma/
-│   ├── schema.prisma       # User와 Post 모델 정의
-│   └── migrations/         # 마이그레이션 파일 (실행 후 생성)
-├── env/
-│   ├── .env.example
-│   ├── .env.development
-│   └── .env.production
-├── src/
-│   ├── config/
-│   │   └── config.js
-│   ├── db/
-│   │   └── prisma.js
-│   └── server.js
-├── generated/
-│   └── prisma/             # 생성된 Prisma Client (실행 후 생성)
-├── prisma.config.js
-├── jsconfig.json
-├── .prettierrc
-├── eslint.config.js
-├── .gitignore
-└── package.json
-```
+## 체크리스트
 
-## 설치 및 실행
+### □ 1단계: Faker.js 설치
 
 ```bash
-# 1. 의존성 설치
-npm install
+npm install -D @faker-js/faker
+```
 
-# 2. 환경 변수 설정
-cp env/.env.example env/.env.development
-# env/.env.development 파일을 열어 DATABASE_URL 수정
+---
 
-# 3. Prisma Client 생성
-npm run prisma:generate
+### □ 2단계: seed.js 파일 생성
 
-# 4. 마이그레이션 실행
-npm run prisma:migrate
-# 마이그레이션 이름 입력: init
+**scripts/seed.js 생성:**
 
-# 5. 개발 서버 실행
-npm run dev
+```javascript
+import { PrismaClient } from "#generated/prisma/client.ts";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { faker } from "@faker-js/faker";
 
-# 6. (선택) Prisma Studio로 데이터베이스 확인
+const NUM_USERS_TO_CREATE = 5;
+
+const xs = (n) =>
+  Array.from({ length: n }, (_, i) => i + 1);
+
+const makeUserInput = () => ({
+  email: faker.internet.email(),
+  name: faker.person.fullName(),
+});
+
+const makePostInputsForUser = (userId, count) =>
+  xs(count).map(() => ({
+    title: faker.lorem.sentence({ min: 3, max: 8 }),
+    content: faker.lorem.paragraphs(
+      { min: 2, max: 5 },
+      "\n\n"
+    ),
+    authorId: userId,
+  }));
+
+const resetDb = (prisma) =>
+  prisma.$transaction([
+    prisma.post.deleteMany(),
+    prisma.user.deleteMany(),
+  ]);
+
+const seedUsers = async (prisma, count) => {
+  const data = xs(count).map(makeUserInput);
+  const emails = data.map((u) => u.email);
+
+  await prisma.user.createMany({ data });
+  return prisma.user.findMany({
+    where: { email: { in: emails } },
+    select: { id: true },
+  });
+};
+
+const seedPosts = async (prisma, users) => {
+  const data = users
+    .map((u) => ({
+      id: u.id,
+      count: faker.number.int({ min: 1, max: 3 }),
+    }))
+    .flatMap(({ id, count }) =>
+      makePostInputsForUser(id, count)
+    );
+
+  await prisma.post.createMany({ data });
+};
+
+async function main(prisma) {
+  if (process.env.NODE_ENV !== "development") {
+    throw new Error(
+      "⚠️  프로덕션 환경에서는 시딩을 실행하지 않습니다"
+    );
+  }
+
+  console.log("🌱 시딩 시작...");
+
+  await resetDb(prisma);
+  console.log("✅ 기존 데이터 삭제 완료");
+
+  const users = await seedUsers(
+    prisma,
+    NUM_USERS_TO_CREATE
+  );
+  await seedPosts(prisma, users);
+
+  console.log(
+    `✅ ${users.length}명의 유저가 생성되었습니다`
+  );
+  console.log("✅ 데이터 시딩 완료");
+}
+
+const adapter = new PrismaPg({
+  connectionString: process.env.DATABASE_URL,
+});
+
+const prisma = new PrismaClient({ adapter });
+
+main(prisma)
+  .catch((e) => {
+    console.error("❌ 시딩 에러:", e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
+```
+
+---
+
+### □ 3단계: package.json에 스크립트 추가
+
+**package.json의 scripts 섹션에 추가:**
+
+```json
+{
+  "scripts": {
+    "dev": "nodemon --env-file=./env/.env.development src/server.js",
+    "prod": "node --env-file=./env/.env.production src/server.js",
+    "prisma:migrate": "dotenv -e ./env/.env.development -- npx prisma migrate dev",
+    "prisma:studio": "dotenv -e ./env/.env.development -- npx prisma studio",
+    "prisma:generate": "dotenv -e ./env/.env.development -- npx prisma generate",
+    "seed": "node --env-file=./env/.env.development scripts/seed.js",
+    "format": "npx prettier --write .",
+    "format:check": "npx prettier --check ."
+  }
+}
+```
+
+---
+
+### □ 4단계: 시딩 실행
+
+```bash
+npm run seed
+```
+
+**실행 결과 확인:**
+
+```
+🌱 시딩 시작...
+✅ 기존 데이터 삭제 완료
+✅ 5명의 유저가 생성되었습니다
+✅ 데이터 시딩 완료
+```
+
+---
+
+### □ 5단계: Prisma Studio로 데이터 확인
+
+```bash
 npm run prisma:studio
 ```
 
-## 주요 변경사항 (01-setup → 02-schema-models)
+**확인 사항:**
 
-### 1. schema.prisma에 모델 추가
+- User 테이블에 5명의 사용자가 생성되었는지 확인
+- Post 테이블에 각 사용자의 게시글이 생성되었는지 확인
+- User를 클릭하면 해당 사용자의 posts 관계 확인 가능
 
-**User 모델:**
-- `id`: Primary Key (자동 증가)
-- `email`: 중복 불가
-- `name`: 선택적 필드
-- `posts`: Post 모델과의 관계 (1:N)
-- `createdAt`, `updatedAt`: 자동 타임스탬프
+---
 
-**Post 모델:**
-- `id`: Primary Key (자동 증가)
-- `title`: 게시글 제목
-- `content`: 게시글 내용 (선택적)
-- `published`: 공개 여부 (기본값: false)
-- `author`, `authorId`: User 모델과의 관계
-- `createdAt`, `updatedAt`: 자동 타임스탬프
+## 완료 확인
 
-### 2. 관계 설정 (1:N)
-
-```prisma
-// User: 한 명의 사용자가 여러 게시글 작성
-model User {
-  posts Post[]  // Post 배열
-}
-
-// Post: 각 게시글은 한 명의 작성자
-model Post {
-  author   User @relation(fields: [authorId], references: [id])
-  authorId Int
-}
-```
-
-## 마이그레이션
-
-마이그레이션 실행 시 다음이 생성됩니다:
-
-- `prisma/migrations/` 폴더
-- `20YYMMDDHHMMSS_init/` 마이그레이션 폴더
-- SQL 파일 (CREATE TABLE 명령어)
-
-## 주요 명령어
-
-```bash
-npm run prisma:generate  # Prisma Client 생성
-npm run prisma:migrate   # 마이그레이션 생성 및 적용
-npm run prisma:studio    # Prisma Studio 실행
-npm run dev              # 개발 서버 실행
-```
-
-## 다음 단계
-
-이제 데이터베이스 테이블이 생성되었습니다. 다음 강의에서는:
-- 마이그레이션의 동작 원리 학습
-- 시딩(Seeding)으로 테스트 데이터 생성
-- Prisma Client로 CRUD 작업 수행
+✅ Faker.js가 설치되었나요?
+✅ seed.js 파일이 생성되었나요?
+✅ package.json에 seed 스크립트가 추가되었나요?
+✅ 시딩이 성공적으로 실행되었나요?
+✅ Prisma Studio에서 데이터를 확인할 수 있나요?
